@@ -216,3 +216,18 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Audio files
+*.wav
+
+# JSON files
+*.json
+
+# MATLAB files
+*.mat
+
+# macOS
+*.DS_Store
+
+# PDF files
+*.pdf
