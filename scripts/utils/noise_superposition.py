@@ -35,10 +35,9 @@ class noise_superposition:
             self.__ventilation[mic_setup] = sorted([wav[:-4] for wav in ventilation_list], key=natsort_key)
         
         # Load the correction gains for all microphones
-        # gains_file = os.path.join('supplementary_material', 'correction_gains', 'gains.json')
+        # TODO: Update gains_file to its simpler version in future
         scripts_dir = Path(__file__).resolve().parents[1]
         gains_file = scripts_dir / "supplementary_material" / "correction_gains" / "gains.json"
-        # TODO: Update gains_file to its simpler version in future
         with open(gains_file, 'r') as f:
             self.__correction_gains = json.load(f)
     
@@ -345,19 +344,19 @@ class noise_superposition:
         
         first_audio = audio_list.pop(0)
         if num_columns == 1:
-            for i, element in enumerate(audio_list):
-                if len(element) >= len(first_audio):
-                    audio_list[i] = element[:len(first_audio)]
-                elif len(element) < len(first_audio):
+            for i, audio in enumerate(audio_list):
+                if len(audio) >= len(first_audio):
+                    audio_list[i] = audio[:len(first_audio)]
+                elif len(audio) < len(first_audio):
                     crossfade_seconds = 1
                     crossfade_samples = int(crossfade_seconds*fs)
 
                     # Create the sine and cosine masks for crossfading
                     sine, cos = create_sine_cosine_masks(4*crossfade_seconds)
 
-                    start = element[0:crossfade_samples]
-                    middle = element[crossfade_samples:len(element)-crossfade_samples]
-                    end = element[len(element)-crossfade_samples:]
+                    start = audio[0:crossfade_samples]
+                    middle = audio[crossfade_samples:len(audio)-crossfade_samples]
+                    end = audio[len(audio)-crossfade_samples:]
                     cf = start * sine + end * cos
 
                     result = np.concatenate((start, middle, cf))
@@ -374,13 +373,13 @@ class noise_superposition:
             return audio_list
         
         else:
-            reference_len = len(first_audio[:, 0])
+            reference_len = first_audio.shape[0]
             updated_audio_list = []
             for i, audio in enumerate(audio_list):
-                if len(audio[:, 0]) >= reference_len:
+                if audio.shape[0] >= reference_len:
                     updated_audio_list.append(audio[:reference_len, :])
                 
-                elif len(audio[:, 0]) < reference_len:
+                elif audio.shape[0] < reference_len:
                     crossfade_seconds = 1
                     crossfade_samples = int(crossfade_seconds*fs)
                     sine, cos = create_sine_cosine_masks(4*crossfade_seconds)
@@ -390,7 +389,7 @@ class noise_superposition:
                         start = audio[0:crossfade_samples, j]
                         middle = audio[crossfade_samples:len(audio)-crossfade_samples, j]
                         end = audio[len(audio)-crossfade_samples:, j]
-                        cf = start * sine + end * cos 
+                        cf = start * sine + end * cos
                     
                         result = np.concatenate((start, middle, cf))
                         while len(result) < reference_len:
