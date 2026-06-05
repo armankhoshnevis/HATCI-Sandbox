@@ -1,6 +1,7 @@
 import os
 import json
 import numpy as np
+from scipy.signal import bilinear, lfilter
 from pathlib import Path
 
 import librosa
@@ -26,13 +27,20 @@ class noise_superposition:
         # Load the available noise and ventilation conditions for each microphone setup
         self.__noises = {}
         self.__ventilation = {}
+        self.__irs = {}
+        self.__radio_irs = {}
+
         natsort_key = natsort_keygen(key=lambda y: y.lower())
         for mic_setup in self.__mic_setups:
             noise_list = os.listdir(os.path.join(self.__path, mic_setup, 'noise'))
             ventilation_list = os.listdir(os.path.join(self.__path, mic_setup, 'ventilation'))
+            irs_list = os.listdir(os.path.join(self.__path, mic_setup, 'IRs'))
+            radio_irs_list = os.listdir(os.path.join(self.__path, mic_setup, 'radio_IRs'))
 
             self.__noises[mic_setup] = sorted([wav[:-4] for wav in noise_list], key=natsort_key)
             self.__ventilation[mic_setup] = sorted([wav[:-4] for wav in ventilation_list], key=natsort_key)
+            self.__irs[mic_setup] = sorted([wav[:-4] for wav in irs_list], key=natsort_key)
+            self.__radio_irs[mic_setup] = sorted([wav[:-4] for wav in radio_irs_list], key=natsort_key)
         
         # Load the correction gains for all microphones
         # TODO: Update gains_file to its simpler version in future
@@ -119,6 +127,26 @@ class noise_superposition:
         raise AttributeError('Cannot set ventilation_recordings.')
     
     @property
+    def irs(self, setup=None):
+        """Returns a dictionary of available IR conditions per microphone configuration."""
+        return self.__irs
+    
+    @irs.setter
+    def irs(self, value):
+        """Prevents setting the IRs."""
+        raise AttributeError('Cannot set irs.')
+    
+    @property
+    def radio_irs(self):
+        """Returns a dictionary of available car audio IR conditions per microphone configuration."""
+        return self.__radio_irs
+    
+    @radio_irs.setter
+    def radio_irs(self, value):
+        """Prevents setting the radio IRs."""
+        raise AttributeError('Cannot set radio_irs.')
+
+    @property
     def correction_gains(self):
         """Returns a dictionary with the correction gains of all microphones."""
         return self.__correction_gains
@@ -127,6 +155,20 @@ class noise_superposition:
     def correction_gains(self, value):
         """Prevents setting the correction gains."""
         raise AttributeError('Cannot set correction_gains.')
+    
+    # TODO: Update the reference mic for the HATCI project
+    @property
+    def __reference_mic(self):
+        """Returns a dictionary of the reference microphone per microphone configuration."""
+        reference_mics = {
+            'Hyundai_Genesis_SUV': {'array': 4, 'distributed': 0},
+        }
+        return reference_mics[self.make + '_' + self.model]
+    
+    @__reference_mic.setter
+    def __reference_mic(self, value):
+        """Prevents setting the reference microphone."""
+        raise AttributeError('Cannot set reference_mic.')
     
     # Private method
     def __find_folders(self, mic_setup=None):
@@ -203,6 +245,32 @@ class noise_superposition:
             fs_ventilation = self.fs
         
         return ventilation[:, mic_range], fs_ventilation
+    
+    def load_radio_ir(self, mic_setup: str, condition):
+        """
+        Loads the radio impulse response (IR) channels for a given microphone setup and radio condition.
+        
+        Args:
+            mic_setup (str): The microphone setup to load the IR for.
+            condition (str): The specific IR condition to load ("window condition").
+        
+        Returns:
+            tuple: A tuple containing the IR data as a NumPy array (N_samples x M_channels) and the sampling frequency of radio IR.
+        
+        Raises:
+            ValueError: If radio IRs are not available.
+            ValueError: If the given radio IR condition is not available for the given microphone configuration.
+        """
+        ir_path = os.path.join(self.__path, mic_setup, 'radio_IRs', condition + '.wav')    
+        mic_range = range(8)
+        
+        ir, fs_ir = sf.read(ir_path) 
+        
+        # Resample
+        if fs_ir != self.fs:
+            ir = librosa.resample(ir, orig_sr=fs_ir, target_sr=self.fs, axis=0)
+            fs_ir = self.fs   
+        return ir[:, mic_range], fs_ir
     
     def get_noise(self, mic_setup:str, speed:int, window:int, version:str=None, mics=None, use_correction_gains=True):
         """
@@ -299,6 +367,70 @@ class noise_superposition:
             gains = [self.correction_gains[str(mic)] for mic in mics]
             ventilation = ventilation * np.array(gains)
         return ventilation
+    
+    def get_radio(self, mic_setup: str, window:int, la: float, radio_audio, mics=None, use_correction_gains=True):
+        if mic_setup not in self.mic_setups:
+            raise ValueError(f"Microphone setup {mic_setup} is not available.")
+        if la < 0:
+            raise ValueError(f"Audio level must be positive.")
+        if window not in [0, 1, 2, 3]:
+            raise ValueError(f"Window condition must be 0, 1, 2 or 3.")
+        if not (isinstance(mics, list) and all(isinstance(item, int) for item in mics)) and not isinstance(mics, int) and mics is not None:
+            raise ValueError(f"mics must be an integer or a list of integers.")
+        
+        if len(radio_audio.shape) > 1:
+            radio_audio = np.mean(radio_audio, axis=1)
+        
+        # TODO: Modify the dBFS to dBA correction addition
+        db_fsa_to_db_a = {
+            0: 124.8755,
+            1: 124.8381,
+            2: 124.7017,
+            3: 124.9197,
+            4: 124.3212,
+            5: 126.4183,
+            6: 125.8413,
+            7: 124.9133,
+            }
+        
+        # TODO: Adjust the conditions for radio IRs
+        radio_ir_condition = f'w{window}'
+        radio_ir, _ = self.load_radio_ir(mic_setup, radio_ir_condition)
+        radio_ir_reference = radio_ir[:, self.__reference_mic[mic_setup]]
+        
+        # Calculate the convolution of the radio audio with the reference microphone's radio IR
+        convolved_radio_reference_signal = np.convolve(radio_audio, radio_ir_reference, mode='full')
+        
+        # Apply the A-weighting filter to the convolved signal
+        convolved_radio_reference_signal = noise_superposition.__A_weighting_filter(convolved_radio_reference_signal, self.fs)
+        
+        # Calculate the RMS of the convolved, filtered signal (average power)
+        convolved_radio_rms = noise_superposition.__calculate_rms(convolved_radio_reference_signal)
+        
+        # Convert to dBFS and adjust to dBA
+        convolved_radio_level = 20 * np.log10(convolved_radio_rms)
+        level = convolved_radio_level + db_fsa_to_db_a[self.__reference_mic[mic_setup]]
+
+        # Calculate correction factor
+        correction_factor = la - level
+        gain = 10 ** (correction_factor / 20)
+
+        if mics is None:
+            mics = list(range(radio_ir.shape[1]))
+        if not isinstance(mics, list):
+            mics = [mics]
+        
+        result = []
+        for mic in mics:
+            convolved_radio_ir = np.convolve(radio_audio, radio_ir[:, mic], mode='full')
+            if use_correction_gains:
+                mic_gain = gain * self.correction_gains[str(mic)]
+                convolved_radio_ir *= mic_gain
+            else:
+                convolved_radio_ir *= gain
+            result.append(convolved_radio_ir)
+        result = np.array(result).T
+        return result
     
     @classmethod
     def match_duration(cls, audio_list: list, fs):
@@ -403,3 +535,42 @@ class noise_superposition:
                     updated_audio_list.append(crossfaded_mic)
             updated_audio_list.insert(0, first_audio)
             return updated_audio_list
+    
+    @classmethod
+    def __A_weighting_filter(cls, s, fs):
+        """Design of an A-weighting filter.
+        b, a = A_weighting(fs) designs a digital A-weighting filter for sampling frequency `fs`. Usage: y = scipy.signal.lfilter(b, a, x).
+        Warning: `fs` should normally be higher than 20 kHz. For example,
+        fs = 48000 yields a class 1-compliant filter.
+        References:
+        [1] IEC/CD 1672: Electroacoustics-Sound Level Meters, Nov. 1996.
+        """
+        # Definition of analog A-weighting filter according to IEC/CD 1672.
+        f1 = 20.598997
+        f2 = 107.65265
+        f3 = 737.86223
+        f4 = 12194.217
+        A1000 = 1.9997
+
+        NUMs = [(2*np.pi * f4)**2 * (10**(A1000/20)), 0, 0, 0, 0]
+        DENs = np.polymul([1, 4*np.pi * f4, (2*np.pi * f4)**2],
+                    [1, 4*np.pi * f1, (2*np.pi * f1)**2])
+        DENs = np.polymul(np.polymul(DENs, [1, 2*np.pi * f3]),
+                                    [1, 2*np.pi * f2])
+
+        b, a = bilinear(NUMs, DENs, fs)
+           
+        return lfilter(b, a, s)
+    
+    @classmethod
+    def __calculate_rms(cls, x):
+        """
+        Calculates the root mean square (RMS) of the given array.
+
+        Args:
+            x (numpy.ndarray): A numpy array for which the RMS is to be calculated.
+
+        Returns:
+            float: The RMS of the input array.
+        """
+        return np.sqrt(np.mean(np.square(x)))
