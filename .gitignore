@@ -231,3 +231,9 @@ __marimo__/
 
 # PDF files
 *.pdf
+
+# csv files
+*.csv
+
+# txt files
+*.txt
